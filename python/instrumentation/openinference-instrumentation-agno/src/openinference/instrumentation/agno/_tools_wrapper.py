@@ -252,8 +252,10 @@ class _FunctionCallWrapper:
             try:
                 if isinstance(item, RunContentEvent) or isinstance(item, TeamRunContentEvent):
                     function_result += self._parse_content(item.content)
-                else:
-                    function_result += str(item)
+                elif isinstance(item, (RunOutputEvent, TeamRunOutputEvent)):
+                    function_result = self._parse_content(item.content)
+                elif isinstance(item, str):
+                    function_result += item
             except Exception:
                 # Don't break if observability fails
                 pass
