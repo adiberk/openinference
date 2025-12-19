@@ -493,7 +493,7 @@ class _ModelWrapper:
         model_name = model.name
         span_name = f"{model_name}.ainvoke_stream"
 
-        with self._tracer.start_as_current_span(
+        span = self._tracer.start_span(
             span_name,
             attributes={
                 OPENINFERENCE_SPAN_KIND: LLM,
@@ -502,56 +502,63 @@ class _ModelWrapper:
                 **dict(_llm_input_messages(arguments)),
                 **dict(get_attributes_from_context()),
             },
-        ) as span:
-            try:
-                span.set_status(trace_api.StatusCode.OK)
-                span.set_attribute(LLM_MODEL_NAME, model.id)
-                span.set_attribute(LLM_PROVIDER, model.provider)
-                # Token usage will be set after streaming completes based on final response
+        )
 
-                responses = []
+        try:
+            span.set_attribute(LLM_MODEL_NAME, model.id)
+            span.set_attribute(LLM_PROVIDER, model.provider)
+            # Token usage will be set after streaming completes based on final response
+
+            responses = []
+            with trace_api.use_span(span, end_on_exit=False):
                 async with aclosing(wrapped(*args, **kwargs)) as stream:  # type: ignore[attr-defined]
                     async for chunk in stream:
                         responses.append(chunk)
                         yield chunk
 
-                output_message_dict = _parse_model_output_stream(responses)
-                output_message = json.dumps(output_message_dict)
-                span.set_attribute(OUTPUT_MIME_TYPE, JSON)
-                span.set_attribute(OUTPUT_VALUE, output_message)
+            output_message_dict = _parse_model_output_stream(responses)
+            output_message = json.dumps(output_message_dict)
+            span.set_attribute(OUTPUT_MIME_TYPE, JSON)
+            span.set_attribute(OUTPUT_VALUE, output_message)
 
-                # Find the final response with complete metrics (last one with response_usage)
-                final_response_with_metrics = None
-                for response in reversed(responses):  # Check from last to first
-                    if hasattr(response, "response_usage") and response.response_usage:
-                        final_response_with_metrics = response
-                        break
+            # Find the final response with complete metrics (last one with response_usage)
+            final_response_with_metrics = None
+            for response in reversed(responses):  # Check from last to first
+                if hasattr(response, "response_usage") and response.response_usage:
+                    final_response_with_metrics = response
+                    break
 
-                # Extract and set token usage from the final response
-                if final_response_with_metrics and final_response_with_metrics.response_usage:
-                    metrics = final_response_with_metrics.response_usage
+            # Extract and set token usage from the final response
+            if final_response_with_metrics and final_response_with_metrics.response_usage:
+                metrics = final_response_with_metrics.response_usage
 
-                    # Set token usage attributes
-                    if hasattr(metrics, "input_tokens") and metrics.input_tokens:
-                        span.set_attribute(LLM_TOKEN_COUNT_PROMPT, metrics.input_tokens)
+                # Set token usage attributes
+                if hasattr(metrics, "input_tokens") and metrics.input_tokens:
+                    span.set_attribute(LLM_TOKEN_COUNT_PROMPT, metrics.input_tokens)
 
-                    if hasattr(metrics, "output_tokens") and metrics.output_tokens:
-                        span.set_attribute(LLM_TOKEN_COUNT_COMPLETION, metrics.output_tokens)
+                if hasattr(metrics, "output_tokens") and metrics.output_tokens:
+                    span.set_attribute(LLM_TOKEN_COUNT_COMPLETION, metrics.output_tokens)
 
-                    # Set cache-related tokens if available
-                    if hasattr(metrics, "cache_read_tokens") and metrics.cache_read_tokens:
-                        span.set_attribute(
-                            LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ, metrics.cache_read_tokens
-                        )
+                # Set cache-related tokens if available
+                if hasattr(metrics, "cache_read_tokens") and metrics.cache_read_tokens:
+                    span.set_attribute(
+                        LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ, metrics.cache_read_tokens
+                    )
 
-                    if hasattr(metrics, "cache_write_tokens") and metrics.cache_write_tokens:
-                        span.set_attribute(
-                            LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_WRITE, metrics.cache_write_tokens
-                        )
-            except Exception as e:
-                span.set_status(trace_api.StatusCode.ERROR, str(e))
-                span.record_exception(e)
-                raise
+                if hasattr(metrics, "cache_write_tokens") and metrics.cache_write_tokens:
+                    span.set_attribute(
+                        LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_WRITE, metrics.cache_write_tokens
+                    )
+
+            span.set_status(trace_api.StatusCode.OK)
+
+        except Exception as e:
+            span.set_status(trace_api.StatusCode.ERROR, str(e))
+            span.record_exception(e)
+            raise
+
+        finally:
+            span.end()
 
 
 # span attributes
